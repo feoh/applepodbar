@@ -1,0 +1,421 @@
+# applepodbar — Specification
+
+**Status:** spec phase, approved for implementation
+**Last verified:** 2026-10-16
+**Project:** `wp-applepodbar-apple-podcasts-terminal-player-4a5c40`
+
+A keyboard-driven terminal podcast player for Apple Podcasts, built with Python
+and [Textual](https://textual.textualize.io/), in the style of
+[plexbar](https://github.com/feoh/plexbar) and
+[tidalbar](https://github.com/feoh/tidalbar).
+
+> [!IMPORTANT]
+> applepodbar is an independent project, not affiliated with or endorsed by
+> Apple. It uses the undocumented AMP API that backs the podcasts.apple.com web
+> player. Apple can change or withdraw that API without notice. No DRM bypass is
+> implemented; applepodbar plays only the plain audio URLs the web player itself
+> receives.
+
+---
+
+## 1. Goals
+
+| # | Goal | Verified feasible |
+|---|------|-------------------|
+| G1 | Browse and search the Apple Podcasts catalog | Yes — §3.2 |
+| G2 | Play free episodes locally through `mpv` | Yes — §3.3 |
+| G3 | Signed-in Library (followed shows, saved episodes) | Yes, needs user token — §3.4 |
+| G4 | Up Next queue | Yes, needs user token — §3.4 |
+| G5 | Cross-device playback-position sync | Yes, needs user token — §3.5 |
+| G6 | Zero-auth RSS / iTunes Search fallback | Yes — §3.6 |
+| G7 | Follow/unfollow shows, save/unsave episodes | Endpoints identified — §3.4 |
+
+### Non-goals
+
+- **No DRM bypass.** If content is not served as a plain fetchable asset to the
+  web player, applepodbar does not play it.
+- **No credential storage of an Apple ID password.** applepodbar never sees the
+  password; the user types it into a real browser (§4.2).
+- **No ad-skipping, no feed scraping at scale, no redistribution.**
+- Not a podcast *manager* — no OPML import/export, no local download library in
+  v1 (streaming only).
+
+### Stretch (unverified)
+
+- **S1: paid Apple Podcasts Subscriptions content.** See §7 — deliberately not
+  committed, because it could not be verified without a paid subscription.
+
+---
+
+## 2. Risk posture
+
+This is a personal project. The owner explicitly accepts the terms-of-service
+risk of using an unsupported private API. The design nonetheless minimizes
+exposure:
+
+- Requests mimic the web player's own headers and respect its rate of access;
+  no bulk crawling.
+- The developer token is **scraped fresh at runtime**, never vendored into the
+  repo (it is Apple's token, it expires, and committing it would be both broken
+  and inappropriate — see §4.1).
+- The user token is stored with user-only file permissions in the platform
+  config dir, and is never logged.
+
+---
+
+## 3. Verified API findings
+
+Everything in this section was probed live against the production API on
+**2026-10-16**. Each row is reproducible with `curl`.
+
+### 3.1 Hosts and auth
+
+| Thing | Value |
+|---|---|
+| Catalog + user API | `https://amp-api.podcasts.apple.com/v1` |
+| Web player origin | `https://podcasts.apple.com` |
+| Developer token header | `Authorization: Bearer <jwt>` |
+| User token header | `media-user-token: <token>` |
+
+The `media-user-token` header name was read directly out of the web bundle, not
+guessed.
+
+The developer token is an ES256 JWT. The one observed on 2026-10-16 had:
+
+```json
+{"iss": "UM7N9RTT7G", "iat": 1792084873, "exp": 1798132873,
+ "root_https_origin": ["apple.com"]}
+```
+
+That is **issued 2026-10-15, expiring 2026-12-24** — a ~70-day life. This is the
+single most important operational fact in this spec: **the token must be scraped,
+not hardcoded.** A vendored token would silently break the app roughly quarterly.
+
+`Origin: https://podcasts.apple.com` must be sent; the token is origin-scoped.
+
+### 3.2 Catalog endpoints — work with the developer token alone
+
+No user sign-in required. All returned HTTP 200:
+
+```
+GET /v1/catalog/{storefront}/search?term=…&types=podcasts&limit=…
+GET /v1/catalog/{storefront}/podcasts/{id}
+GET /v1/catalog/{storefront}/podcasts/{id}?include=episodes&limit[episodes]=N
+GET /v1/catalog/{storefront}/podcasts/{id}/episodes?limit=…
+GET /v1/catalog/{storefront}/charts?types=podcasts&limit=…
+GET /v1/editorial/{storefront}/groupings?platform=web&name=podcasts
+```
+
+Note `limit[episodes]=N` contains brackets — it must not be URL-mangled
+(`curl -g`, and `params` passed as a plain dict in `httpx`).
+
+Show `attributes` include: `artistName`, `artwork`, `contentRating`, `copyright`,
+`description`, `genreNames`, `kind`, `name`, `offers`, `releaseDateTime`,
+`releaseFrequency`, `seasonNumbers`, `subscribable`, `subscriptionUrl`,
+`trackCount`, `url`, `websiteUrl`.
+
+Episode `attributes` include: `assetUrl`, `durationInMilliseconds`, `guid`,
+`name`, `itunesTitle`, `description`, `artwork`, `releaseDateTime`,
+`contentAdvisory`, `offers`, `kind`, `mediaKind`, `url`.
+
+### 3.3 Playback — free episodes expose a plain MP3
+
+Confirmed on *The Daily* (`1200361736`), episode `1000796640093`:
+
+- `assetUrl` is a tracking-redirect chain
+  (`dts.podtrac.com` → `pdst.fm` → `pscrb.fm` → `nyt.simplecastaudio.com`).
+- A ranged request returns **HTTP 206, `Content-Type: audio/mpeg`**.
+
+Range support means seeking works, which means `mpv` can treat it as an ordinary
+seekable stream. **No special player handling is required for free episodes.**
+
+`durationInMilliseconds` gives total length without probing the asset.
+
+### 3.4 Library endpoints — require the user token
+
+Extracted from the web bundle (authoritative, not guessed):
+
+```
+/v1/me/library/podcasts                          followed shows
+/v1/me/library/podcast-episodes                  saved episodes
+/v1/me/library/next-episodes                     Up Next
+/v1/me/library/latest-episodes                   latest from followed shows
+/v1/me/library/podcast-channels                  subscribed paid channels
+/v1/me/library/podcast-stations
+/v1/me/library/recent/updated/podcast-episodes
+/v1/me/recent/played/podcast-episodes            recently played
+/v1/me/playback/positions/podcast-episodes       position sync (§3.5)
+/v1/me/storefront                                user's storefront
+```
+
+Behaviour without a user token distinguishes two failure modes, which the client
+must treat differently:
+
+- `GET /v1/me/library/podcasts` → **403** `{"title":"Forbidden","detail":"Authentication required for request","code":"40300"}`
+- `GET /v1/me/library/shows` → **400** `{"title":"Invalid Path Value","detail":"Unknown library resource type 'shows'","code":"40008"}`
+
+A 403/40300 means "sign in" and should trigger the login flow or the anonymous
+fallback. A 400/40008 is a **bug in applepodbar** (wrong path) and must surface
+as an error, not as a login prompt. Do not collapse these.
+
+### 3.5 Position sync — exact wire format
+
+Read out of the bundle's own request builder:
+
+```
+PUT /v1/me/playback/positions/podcast-episodes?ids[]={episodeId}
+```
+
+Body:
+
+```json
+{
+  "type": "playback-positions",
+  "attributes": {
+    "positionInMilliseconds": 123000,
+    "recordedAtTimestamp": "2026-10-16T21:00:00.000Z",
+    "completed": false
+  }
+}
+```
+
+Observed semantics from the bundle: when `completed` is not supplied explicitly
+it defaults to `position == duration`; `recordedAtTimestamp` is the client's
+current time in ISO-8601. Reads come back with `positionInMilliseconds` and
+`completed`, and the player resumes at `positionInMilliseconds / 1000` seconds.
+
+This is G5 (cross-device sync) fully specified. It is a real two-way sync: write
+on pause/stop/exit/episode-end, read on episode load.
+
+### 3.6 Zero-auth fallback
+
+`itunes.apple.com` needs no token at all and bridges cleanly to the AMP catalog:
+
+```
+GET https://itunes.apple.com/search?term=…&entity=podcast&limit=…
+GET https://itunes.apple.com/lookup?id={collectionId}
+```
+
+Critically, **`collectionId` from iTunes Search is the same id as the AMP catalog
+podcast id.** Verified: iTunes `collectionId` 1200361736 for *The Daily* is the
+same id that `GET /v1/catalog/us/podcasts/1200361736` resolves. The lookup also
+returns `feedUrl` (e.g. `https://feeds.simplecast.com/Sl5CSM3S`), so the fallback
+can fetch the publisher's RSS directly and read enclosure URLs.
+
+This makes the fallback a genuine drop-in rather than a parallel universe: the
+same show id works in both backends.
+
+---
+
+## 4. Authentication design
+
+Two tokens, acquired two different ways, with very different lifetimes.
+
+### 4.1 Developer token — scraped at runtime
+
+1. `GET https://podcasts.apple.com/{storefront}/podcast/…` (any show page) with a
+   browser-like `User-Agent`, following redirects.
+2. Parse the HTML for the main module bundle:
+   `<script type="module" crossorigin src="/assets/index~<hash>.js">`.
+   The hash changes on every web deploy, so it must be read from the HTML, not
+   cached as a URL.
+3. `GET` that bundle and extract the first ES256 JWT matching
+   `eyJ0eXAiOiJKV1QiLCJhbGciOiJFUzI1NiI[A-Za-z0-9._-]{40,}`.
+   (Note the header is `{"typ":"JWT","alg":"ES256",…}` — a naive
+   `eyJhbGciOiJFUzI1NiI` prefix does **not** match and will find nothing.)
+4. Decode the payload, read `exp`, cache the token to disk with its expiry.
+5. Re-scrape when within 24h of `exp`, or on any 401 from the API.
+
+Failure of this step is fatal and must produce a clear, actionable error
+("could not extract Apple's web player token — the web player may have
+changed"), not a generic HTTP error.
+
+### 4.2 User token — one-time Playwright capture
+
+The owner's chosen approach, and the only one that does not require handling the
+Apple ID password or implementing Apple's SRP/2FA dance.
+
+1. `applepodbar login` launches a **headed** Chromium via Playwright at
+   `https://podcasts.apple.com`.
+2. The user signs in themselves, including 2FA, in that real browser window.
+   applepodbar neither reads nor stores the password.
+3. applepodbar waits for the sign-in to settle, then reads the
+   `media-user-token` value — from the page's own storage/cookies as the web
+   player sets it — and persists it.
+4. The browser closes. This is a once-per-machine operation.
+
+Storage: the token goes in the config dir (§5) in a file created with mode
+`0600`. It is never logged, never echoed to the TUI, and redacted from any
+debug/HTTP trace output.
+
+Playwright is an **optional dependency** (`applepodbar[login]`), because the
+anonymous catalog experience must work without a 400MB browser download. The
+login command tells the user how to install it if missing.
+
+Re-auth: a 403/40300 on a `/v1/me/` route means the user token has expired or
+been revoked. The client clears it and tells the user to re-run
+`applepodbar login`.
+
+---
+
+## 5. Architecture
+
+Mirrors plexbar's module boundaries so the two projects stay legible together.
+
+```
+src/applepodbar/
+  __init__.py
+  __main__.py
+  app.py            # ApplepodbarApp: Textual UI, keybindings, view state
+  models.py         # Show, Episode, BrowserItem, ItemKind, QueueEpisode
+  settings.py       # config load/save, token persistence, storefront
+  tokens.py         # developer-token scrape + cache (§4.1)
+  login.py          # Playwright media-user-token capture (§4.2)  [optional dep]
+  amp_client.py     # AMP catalog + /me client (httpx)
+  rss_client.py     # iTunes Search + RSS fallback (§3.6)
+  catalog.py        # backend-agnostic facade over amp_client / rss_client
+  playback.py       # MpvPlayer (JSON IPC) + PlaybackQueue
+  positions.py      # position read/write + sync policy (§3.5)
+tests/
+docs/SPEC.md
+```
+
+### Key boundaries
+
+- **`catalog.py` is the only thing `app.py` talks to for content.** It decides
+  per call whether to use AMP (token available) or RSS (anonymous/degraded), so
+  the UI never branches on auth state for data access.
+- **`amp_client.py` owns header assembly and error translation.** It converts the
+  403/40300 vs 400/40008 distinction (§3.4) into two different exception types:
+  `AuthRequired` and `AmpClientError`. The UI handles `AuthRequired`; everything
+  else is a bug or an outage.
+- **`playback.py` mirrors plexbar's `MpvPlayer`**: a persistent `mpv` process
+  driven over JSON IPC. Tests must never need a real `mpv` — monkeypatch
+  `shutil.which`, `_start_mpv`, `_command`, or inject a fake player.
+- **`positions.py` holds the sync *policy*** (when to write), separate from the
+  client that performs the HTTP. Policy: write on pause, stop, episode end,
+  app exit, and on a periodic tick while playing (30s), coalesced so a
+  pause-immediately-after-tick does not double-write. Read on episode load, and
+  resume if the stored position is >30s in and not `completed`.
+
+### Data model
+
+`models.py` is the shared boundary type set, exactly like plexbar's. Both
+`amp_client` and `rss_client` produce the *same* `Show`/`Episode` objects, which
+is what makes the fallback transparent. `Episode` carries `asset_url`,
+`duration_ms`, `guid`, and `source` (`amp` | `rss`) so playback and position sync
+can tell whether server-side sync is even possible.
+
+---
+
+## 6. UI
+
+Textual, keyboard-first, following plexbar's layout: browser pane, side pane,
+now-playing label, artwork, queue, status line, footer.
+
+Views: **Home** (editorial groupings / charts), **Search**, **Library**
+(followed shows, saved episodes), **Up Next**, **Show detail** (episode list),
+**Now Playing**.
+
+Anonymous mode shows Home, Search, and Show detail, with Library and Up Next
+replaced by a prompt to run `applepodbar login`.
+
+Keybindings follow plexbar where the concept matches (`/` search, `f` focus now
+playing, `s` stop, space play/pause, `q` quit), plus podcast-specific ones:
+seek ±30s/±15s, playback speed, mark played.
+
+### Testing Textual behaviour
+
+Use `App.run_test()` with fake `catalog` and `player` objects, per plexbar's
+hard-won notes: patch `on_mount` unless the test is specifically exercising
+setup, and hide/defocus the search `Input` before pressing letter-key bindings,
+or the `Input` eats them.
+
+---
+
+## 7. Paid Apple Podcasts Subscriptions (stretch, UNVERIFIED)
+
+**This could not be verified and must not be assumed.**
+
+What is known: shows carry `subscribable: true` and an `offers` array. A show
+with a paid tier shows `[{"kind":"get","type":"STDQ"}, {"kind":"subscribe","type":"PSUB"}]`.
+`STDQ` marks the free back catalogue; `PSUB` marks the paid subscription.
+
+What was tested: episodes of a `PSUB` show (*Guru: Don't Cross Kat*,
+`1518839824`) were fetched — **all eight returned episodes were `STDQ` and had
+plain `.mp3` `assetUrl`s.** That is the *free* tier of a show that also sells a
+paid tier. It says nothing about paid-only episodes.
+
+What remains unknown: whether a paid-only episode, fetched by an *entitled*
+account, returns a plain `assetUrl` or an HLS/FairPlay URL. The bundle's presence
+of `isEntitledToChannel` / `isEntitledOffer` flags suggests entitlement gating is
+real.
+
+**Decision: the spike (`tk-spike-paid-apple-podcasts-subscriptions-stream-f-a7533c`)
+stays open and blocked on the owner having an active paid subscription to test
+with. If paid episodes turn out to be FairPlay-protected, the task is closed as
+won't-do** — that falls on the wrong side of the no-DRM-bypass line in §1.
+
+---
+
+## 8. Configuration
+
+Platform-standard user config dir via `platformdirs` (same as plexbar):
+
+```
+<config_dir>/applepodbar/
+  config.toml        storefront, UI prefs, playback speed, seek increments
+  tokens.json        dev token + exp, media-user-token      (mode 0600)
+```
+
+Storefront defaults to `us`, overridable in config, and refreshed from
+`/v1/me/storefront` once signed in.
+
+---
+
+## 9. Tooling and validation
+
+Matching plexbar: Python 3.12+, `uv` for everything, `uv_build` backend, MIT
+licence, `pytest`, `ruff`, `mypy`, pre-commit via `prek`.
+
+```bash
+uv run pytest -q
+uv run prek run --all-files
+uv run mypy src/applepodbar tests
+```
+
+Dependencies: `textual`, `httpx`, `platformdirs`, `feedparser` (RSS fallback).
+Optional extra `login`: `playwright`.
+
+No test may require network access, a real `mpv`, or a real browser. The AMP
+client is tested against recorded fixtures captured from the probes in §3.
+
+---
+
+## 10. Risks
+
+| Risk | Likelihood | Mitigation |
+|---|---|---|
+| Dev-token scrape breaks on a web deploy | Medium | Parse bundle URL from HTML each time; clear error message; §4.1 |
+| Token expires (~70 days) | Certain | Cache with `exp`, auto-rescrape; §4.1 |
+| Apple changes/withdraws AMP API | Low-medium | RSS fallback (§3.6) keeps core browse+play working with zero auth |
+| `media-user-token` capture breaks | Medium | Only affects Library/Up Next/sync; catalog unaffected |
+| Paid content is DRM-protected | Unknown | Scoped as a stretch spike; won't-do if FairPlay (§7) |
+| Playwright install friction | Medium | Optional extra; anonymous mode fully functional without it |
+
+---
+
+## 11. Implementation order
+
+The task graph already encodes this. Dependency-correct order:
+
+1. `tk-scaffold-…` — repo, uv, Textual shell, config, mpv boundary **(unblocks everything)**
+2. `tk-amp-catalog-client-…` — §3.2, §4.1
+3. `tk-one-time-playwright-browser-login-…` — §4.2
+4. `tk-textual-ui-…` — §6
+5. `tk-signed-in-library-up-next-…` — §3.4
+6. `tk-cross-device-playback-position-sync-…` — §3.5
+7. `tk-zero-auth-rss-itunes-search-fallback-…` — §3.6
+8. `tk-follow-unfollow-shows-and-save-episodes-…`
+9. `tk-spike-paid-…` — §7, blocked on a paid subscription
+10. `tk-packaging-readme-ci-…`
