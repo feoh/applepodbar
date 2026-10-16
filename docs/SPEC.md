@@ -29,6 +29,7 @@ and [Textual](https://textual.textualize.io/), in the style of
 | G5 | Cross-device playback-position sync | Yes, needs user token — §3.5 |
 | G6 | Zero-auth RSS / iTunes Search fallback | Yes — §3.6 |
 | G7 | Follow/unfollow shows, save/unsave episodes | Endpoints identified — §3.4 |
+| — | Paid Subscriptions content | **No** — FairPlay DRM, out of scope, §7 |
 
 ### Non-goals
 
@@ -40,10 +41,11 @@ and [Textual](https://textual.textualize.io/), in the style of
 - Not a podcast *manager* — no OPML import/export, no local download library in
   v1 (streaming only).
 
-### Stretch (unverified)
+### Resolved out of scope
 
-- **S1: paid Apple Podcasts Subscriptions content.** See §7 — deliberately not
-  committed, because it could not be verified without a paid subscription.
+- **S1: paid Apple Podcasts Subscriptions content.** Verified 2026-10-16 against a
+  real paid subscription and found to be FairPlay-protected. **Out of scope** —
+  see §7.
 
 ---
 
@@ -113,6 +115,10 @@ Show `attributes` include: `artistName`, `artwork`, `contentRating`, `copyright`
 `description`, `genreNames`, `kind`, `name`, `offers`, `releaseDateTime`,
 `releaseFrequency`, `seasonNumbers`, `subscribable`, `subscriptionUrl`,
 `trackCount`, `url`, `websiteUrl`.
+
+`offers` entries are `{kind, type}` with `type` in `{STDQ, PLUS, PSUB, PRMO}`.
+**A `subscribe/PSUB` offer is an upsell and appears on free episodes too** — only
+a `get` offer whose type is not `STDQ` marks paid content. See §7.
 
 Episode `attributes` include: `assetUrl`, `durationInMilliseconds`, `guid`,
 `name`, `itunesTitle`, `description`, `artwork`, `releaseDateTime`,
@@ -333,28 +339,109 @@ or the `Input` eats them.
 
 ---
 
-## 7. Paid Apple Podcasts Subscriptions (stretch, UNVERIFIED)
+## 7. Paid Apple Podcasts Subscriptions — RESOLVED: out of scope
 
-**This could not be verified and must not be assumed.**
+**Verified 2026-10-16 against a real paid subscription (Cool Zone Media, giving
+ad-free Behind the Bastards). Paid audio is FairPlay-protected. applepodbar will
+not play it.**
 
-What is known: shows carry `subscribable: true` and an `offers` array. A show
-with a paid tier shows `[{"kind":"get","type":"STDQ"}, {"kind":"subscribe","type":"PSUB"}]`.
-`STDQ` marks the free back catalogue; `PSUB` marks the paid subscription.
+### The four `priceType` values
 
-What was tested: episodes of a `PSUB` show (*Guru: Don't Cross Kat*,
-`1518839824`) were fetched — **all eight returned episodes were `STDQ` and had
-plain `.mp3` `assetUrl`s.** That is the *free* tier of a show that also sells a
-paid tier. It says nothing about paid-only episodes.
+The real enum, from the bundle, is `{PLUS, PRMO, PSUB, STDQ}` — not the
+`STDQ`/`PSUB` pair the first pass assumed:
 
-What remains unknown: whether a paid-only episode, fetched by an *entitled*
-account, returns a plain `assetUrl` or an HLS/FairPlay URL. The bundle's presence
-of `isEntitledToChannel` / `isEntitledOffer` flags suggests entitlement gating is
-real.
+| priceType | Meaning | Stream |
+|---|---|---|
+| `STDQ` | Free, ad-supported | plain MP3, playable |
+| `PLUS` | Ad-free subscriber tier | FairPlay HLS |
+| `PSUB` | Subscription-only episode | FairPlay HLS |
+| `PRMO` | Promo | not observed |
 
-**Decision: the spike (`tk-spike-paid-apple-podcasts-subscriptions-stream-f-a7533c`)
-stays open and blocked on the owner having an active paid subscription to test
-with. If paid episodes turn out to be FairPlay-protected, the task is closed as
-won't-do** — that falls on the wrong side of the no-DRM-bypass line in §1.
+Behind the Bastards (`1373812661`) carries
+`[{"kind":"get","type":"PLUS"},{"kind":"get","type":"STDQ"},{"kind":"subscribe","type":"PSUB"}]`.
+
+### Where the paid audio is, and is not
+
+It is **not** in the catalog API. Paginating all 400 episodes of the show while
+signed in, with `with=entitlements` *and* `extend=mediaEnclosures`, returned:
+
+```
+offer histogram: {"get/STDQ": 400, "subscribe/PSUB": 400}
+non-STDQ "get" offers: 0
+mediaEnclosures returned: 0
+```
+
+The same held for `/v1/me/library/next-episodes` and `latest-episodes`. Note that
+`subscribe/PSUB` is an **upsell** offer, present on every episode including free
+ones; it does not mark an episode as paid. Classify by a `get` offer whose type
+is not `STDQ`.
+
+The paid enclosures are delivered in the **signed-in web page's
+`serialized-server-data` blob**, not by any AMP endpoint we found. That blob
+carried 226 enclosures: 139 `STDQ`, 52 `PSUB`, 24 `PLUS`.
+
+### The stream format
+
+Every paid (`PLUS` and `PSUB`) enclosure points at:
+
+```
+https://play.itunes.apple.com/WebObjects/MZPlay.woa/podcast/hls/playlist.m3u8?cc=US&a={episodeId}&id={assetId}&l=en-us
+```
+
+That playlist declares its key in an `EXT-X-SESSION-DATA` block
+(`DATA-ID="com.apple.hls.keys"`), base64 of:
+
+```json
+[{"keyformatversion":["1"],
+  "method":"SAMPLE-AES",
+  "keyformat":"com.apple.streamingkeydelivery",
+  "uri":"skd://itunes.apple.com/p1525307190/c6"}]
+```
+
+`SAMPLE-AES` + `com.apple.streamingkeydelivery` + an `skd://` key URI is
+**FairPlay Streaming**. Confirmed on both tiers independently — a `PSUB` full
+episode (`skd://itunes.apple.com/p1525307190/c6`) and a `PLUS` asset
+(`skd://itunes.apple.com/p631380742/a`).
+
+ffmpeg's practical verdict on the same URL:
+
+```
+[hls] Unable to open key file data:text/plain;base64,AAAAOHBzc2g...
+[hls] Error when loading first segment ...
+Invalid data found when processing input
+```
+
+(The key blob is a PSSH initialisation box.) The free `STDQ` MP3 of the *same
+episode* plays in mpv without complaint.
+
+### Decision
+
+**Closed won't-do**, exactly on the condition pre-registered in the first pass.
+Playing this would require defeating FairPlay, which §1 rules out. Note this is
+not a limitation we can engineer around: the free ad-supported version of a show
+remains fully playable, so a subscriber can still listen to the show in
+applepodbar — with ads.
+
+### What the UI must do
+
+Since paid episodes are unplayable, the UI must not pretend otherwise:
+
+- Treat an episode as paid when it has a `get` offer whose type is not `STDQ`.
+- Paid episodes should still be *listed* (they are part of the show), marked
+  clearly, and refuse to play with an explanation plus the `subscriptionUrl`
+  for listening in Apple's own client.
+- Never surface a `play.itunes.apple.com/.../hls/playlist.m3u8` URL to mpv; it
+  will fail with an opaque decode error.
+
+### Incidental findings
+
+- `/v1/catalog/{sf}/podcast-channels/{id}` works, and `.../podcasts` lists the
+  channel's shows. `.../shows` is a 400. `?views=top-shows` also works.
+- `/v1/me/library/podcast-channels` lists subscribed paid channels and is how to
+  tell which channels a user is entitled to.
+- `isEntitledOffer` appears on episode records in the web blob.
+- `streamUrl: "appleInternal://misconfiguredEpisode"` exists as a real sentinel
+  value in the bundle; guard against it.
 
 ---
 
@@ -400,7 +487,7 @@ client is tested against recorded fixtures captured from the probes in §3.
 | Token expires (~70 days) | Certain | Cache with `exp`, auto-rescrape; §4.1 |
 | Apple changes/withdraws AMP API | Low-medium | RSS fallback (§3.6) keeps core browse+play working with zero auth |
 | `media-user-token` capture breaks | Medium | Only affects Library/Up Next/sync; catalog unaffected |
-| Paid content is DRM-protected | Unknown | Scoped as a stretch spike; won't-do if FairPlay (§7) |
+| Paid content is DRM-protected | **Confirmed** | Out of scope; free tier still plays, UI marks paid episodes unplayable (§7) |
 | Playwright install friction | Medium | Optional extra; anonymous mode fully functional without it |
 
 ---
@@ -417,5 +504,5 @@ The task graph already encodes this. Dependency-correct order:
 6. `tk-cross-device-playback-position-sync-…` — §3.5
 7. `tk-zero-auth-rss-itunes-search-fallback-…` — §3.6
 8. `tk-follow-unfollow-shows-and-save-episodes-…`
-9. `tk-spike-paid-…` — §7, blocked on a paid subscription
+9. ~~`tk-spike-paid-…`~~ — **done, closed won't-do** (§7)
 10. `tk-packaging-readme-ci-…`

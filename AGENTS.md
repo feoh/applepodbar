@@ -35,9 +35,15 @@ noted — so prefer it over guessing or re-deriving endpoint behaviour.
   use `-g`.
 - **Send `Origin: https://podcasts.apple.com`** — the developer token is
   origin-scoped.
-- **Paid (PSUB) content is unverified.** Episodes visible without entitlement are
-  the free STDQ back catalogue and prove nothing about paid-only streams. Do not
-  write code that assumes paid episodes have a plain `assetUrl`.
+- **Paid content is FairPlay-protected and out of scope.** Verified against a
+  real subscription: `PLUS` and `PSUB` audio is `SAMPLE-AES` HLS with an `skd://`
+  key (`com.apple.streamingkeydelivery`). mpv and ffmpeg cannot decode it, and
+  making them is out of scope. Never hand a
+  `play.itunes.apple.com/.../hls/playlist.m3u8` URL to mpv. Spec §7.
+- **`subscribe/PSUB` does NOT mean an episode is paid.** It is an upsell offer
+  present on every episode of a show that sells a subscription, free ones
+  included. Paid means a **`get`** offer whose type is not `STDQ`. Getting this
+  wrong marks the entire free catalogue as unplayable.
 
 ## Testing
 
