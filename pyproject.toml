@@ -1,0 +1,31 @@
+[project]
+name = "applepodbar"
+version = "0.1.0"
+description = "A command-line TUI podcast player for Apple Podcasts"
+readme = "README.md"
+authors = [{ name = "Christopher Patti", email = "feoh@feoh.org" }]
+license = "MIT"
+license-files = ["LICENSE"]
+requires-python = ">=3.12"
+dependencies = [
+  "feedparser>=6.0.11",
+  "httpx>=0.28.1",
+  "platformdirs>=4.10.0",
+  "textual>=8.2.7",
+]
+
+[project.optional-dependencies]
+login = ["playwright>=1.49.0"]
+
+[project.scripts]
+applepodbar = "applepodbar.app:main"
+
+[build-system]
+requires = ["uv_build>=0.9.18,<0.10.0"]
+build-backend = "uv_build"
+
+[tool.uv.build-backend]
+source-exclude = [".ruff_cache"]
+
+[dependency-groups]
+dev = ["mypy>=2.1.0", "pytest>=9.0.3", "ruff>=0.15.16"]
