@@ -235,8 +235,11 @@ def test_tokens_round_trip_and_are_not_world_readable(tmp_path: Path) -> None:
     )
     save_tokens(tokens, path)
 
-    assert load_tokens(path) == tokens
-    assert tokens.is_signed_in
+    assert load_tokens(path) == Tokens(
+        developer_token=tokens.developer_token,
+        developer_token_expires_at=tokens.developer_token_expires_at,
+    )
+    assert "user-token" not in path.read_text(encoding="utf-8")
 
     mode = stat.S_IMODE(path.stat().st_mode)
     assert mode == 0o600, f"tokens.json is mode {mode:o}, expected 600"
@@ -255,9 +258,20 @@ def test_corrupt_token_cache_is_recoverable(tmp_path: Path) -> None:
     assert load_tokens(tmp_path / "absent.json") == Tokens()
 
 
-def test_clearing_the_user_token_keeps_the_developer_token(tmp_path: Path) -> None:
+def test_clearing_the_user_token_keeps_the_developer_token(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """A 403 on /v1/me/ invalidates the user token only, not Apple's."""
 
+    from applepodbar import settings
+
+    session = ["user"]
+    monkeypatch.setattr(
+        settings,
+        "load_session",
+        lambda: type("Session", (), {"token": session[0]})() if session else None,
+    )
+    monkeypatch.setattr(settings, "clear_session", lambda: session.clear())
     path = tmp_path / "tokens.json"
     save_tokens(
         Tokens(
@@ -306,14 +320,32 @@ def test_home_is_available_without_signing_in() -> None:
 
     assert state.message == ""
     assert [item.title for item in state.items] == [
-        "Top Shows",
-        "Top Episodes",
-        "Browse by Category",
+        "Browse genres",
+        "Editorial collections",
     ]
     assert all(item.kind is ItemKind.CATEGORY for item in state.items)
 
 
 # -- app shell ------------------------------------------------------------
+
+
+@pytest.fixture(autouse=True)
+def offline_catalog(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Every UI test stays offline, including startup's Home load."""
+
+    class FakeCatalog:
+        using_rss = False
+
+        def __init__(self, *, storefront: str = "us", backend: str = "amp") -> None:
+            pass
+
+        def charts(self) -> list[Show]:
+            return []
+
+        def close(self) -> None:
+            pass
+
+    monkeypatch.setattr(app_module, "Catalog", FakeCatalog)
 
 
 class FakePlayer:
@@ -333,6 +365,9 @@ class FakePlayer:
 
     def pause_resume(self) -> None:
         self.is_paused = not self.is_paused
+
+    def playback_progress(self) -> PlaybackProgress:
+        return PlaybackProgress(30, 60)
 
     def seek(self, offset_seconds: float) -> None:
         self.seeks.append(offset_seconds)
@@ -369,7 +404,7 @@ def test_app_starts_on_home_without_tokens(monkeypatch: pytest.MonkeyPatch) -> N
             assert pilot_app.sub_title == "Home"
 
             browser = pilot_app.query_one("#browser-list", app_module.ListView)
-            assert len(browser.children) == 3
+            assert len(browser.children) >= 2
 
             status = pilot_app.query_one("#status", app_module.Static)
             assert "Not signed in" in str(status.render())

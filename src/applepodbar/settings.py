@@ -4,7 +4,8 @@ Layout is specified in docs/SPEC.md §8:
 
     <config_dir>/applepodbar/
       config.toml   preferences (non-secret)
-      tokens.json   developer token + expiry, media-user-token  (mode 0600)
+      tokens.json   developer token + expiry  (mode 0600)
+      OS keyring     media-user-token and browser session
 
 Tokens live in their own file so the preferences file stays safe to read,
 diff, and paste into a bug report.
@@ -20,6 +21,8 @@ from pathlib import Path
 from typing import Any
 
 from platformdirs import user_config_dir
+
+from applepodbar.credentials import clear_session, load_session
 
 APP_NAME = "applepodbar"
 CONFIG_DIR = Path(user_config_dir(APP_NAME))
@@ -37,6 +40,7 @@ class ApplepodbarConfig:
     """Persisted, non-secret preferences."""
 
     storefront: str = DEFAULT_STOREFRONT
+    catalog_backend: str = "amp"
     seek_forward_seconds: int = DEFAULT_SEEK_FORWARD_SECONDS
     seek_back_seconds: int = DEFAULT_SEEK_BACK_SECONDS
     playback_speed: float = DEFAULT_PLAYBACK_SPEED
@@ -51,7 +55,7 @@ class Tokens:
     vendored into the repository -- see docs/SPEC.md §4.1.
 
     ``media_user_token`` identifies the signed-in user and is captured once by
-    the Playwright login flow (§4.2).
+    the Playwright login flow (§4.2), then stored only in the OS keyring.
     """
 
     developer_token: str | None = None
@@ -91,6 +95,7 @@ def load_config(path: Path = CONFIG_PATH) -> ApplepodbarConfig:
 
     return ApplepodbarConfig(
         storefront=storefront or defaults.storefront,
+        catalog_backend="rss" if general.get("catalog_backend") == "rss" else "amp",
         seek_forward_seconds=_positive_int(
             playback.get("seek_forward_seconds"), defaults.seek_forward_seconds
         ),
@@ -111,6 +116,7 @@ def save_config(config: ApplepodbarConfig, path: Path = CONFIG_PATH) -> None:
         [
             "[general]",
             f'storefront = "{_toml_escape(config.storefront)}"',
+            f'catalog_backend = "{_toml_escape(config.catalog_backend)}"',
             "",
             "[playback]",
             f"seek_forward_seconds = {config.seek_forward_seconds}",
@@ -129,23 +135,24 @@ def load_tokens(path: Path = TOKENS_PATH) -> Tokens:
     must never be fatal.
     """
 
+    session = load_session()
     if not path.exists():
-        return Tokens()
+        return Tokens(media_user_token=session.token if session else None)
 
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
-        return Tokens()
+        return Tokens(media_user_token=session.token if session else None)
 
     if not isinstance(data, dict):
-        return Tokens()
+        return Tokens(media_user_token=session.token if session else None)
 
     return Tokens(
         developer_token=_optional_str(data.get("developer_token")),
         developer_token_expires_at=_optional_int(
             data.get("developer_token_expires_at")
         ),
-        media_user_token=_optional_str(data.get("media_user_token")),
+        media_user_token=session.token if session else None,
     )
 
 
@@ -156,7 +163,6 @@ def save_tokens(tokens: Tokens, path: Path = TOKENS_PATH) -> None:
     payload: dict[str, Any] = {
         "developer_token": tokens.developer_token,
         "developer_token_expires_at": tokens.developer_token_expires_at,
-        "media_user_token": tokens.media_user_token,
     }
     contents = json.dumps(payload, indent=2) + "\n"
 
@@ -175,6 +181,7 @@ def clear_media_user_token(path: Path = TOKENS_PATH) -> Tokens:
     token expired or was revoked.
     """
 
+    clear_session()
     tokens = replace(load_tokens(path), media_user_token=None)
     save_tokens(tokens, path)
     return tokens

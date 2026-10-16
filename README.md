@@ -13,20 +13,21 @@ Podcasts](https://podcasts.apple.com), built with Python and
 
 ## Status
 
-Early. The application shell runs: view switching, keybindings, the playback
-queue, the now-playing area, and the `mpv` engine boundary are in place, with
-placeholder content in each view. The catalog, library, and sync clients are
-next â€” see [`docs/SPEC.md`](docs/SPEC.md) for the full design and the
-implementation order.
+Early. Home charts, genre/editorial browse, search, show detail, and free-episode
+playback are wired to the AMP catalog. Playwright login is available as an
+optional extra. If Apple's web token cannot be found, search and playback fall
+back to iTunes Search and publisher RSS. Signed-in Library, Up Next, and
+cross-device playback-position sync, and follow/save actions are now wired.
+Paid FairPlay content remains out of scope; see [`docs/SPEC.md`](docs/SPEC.md).
 
-## Planned features
+![applepodbar home screen showing top podcasts](docs/screenshot.svg)
 
-- Browse and search the Apple Podcasts catalog
-- Stream free episodes locally through `mpv`
-- Signed-in Library (followed shows, saved episodes) and Up Next
-- Cross-device playback-position sync with Apple's own apps
-- A zero-auth RSS / iTunes Search fallback that keeps browsing and playback
-  working with no sign-in at all
+## Features
+
+- Browse and search the Apple Podcasts catalog; play free episodes through `mpv`
+- Signed-in Library, Up Next, follows/saves, and cross-device position sync
+- Zero-auth iTunes Search + RSS fallback with local follows and resume positions
+- Paid FairPlay episodes are listed but not playable
 
 ## Requirements
 
@@ -35,6 +36,14 @@ implementation order.
 - [`mpv`](https://mpv.io/) on `PATH` (needed for playback; browsing works
   without it)
 - An Apple account, only for the signed-in features
+
+## Install
+
+```bash
+# From a local checkout (not yet published to PyPI):
+uv tool install --from . applepodbar
+applepodbar
+```
 
 ## Installation for development
 
@@ -56,6 +65,7 @@ it once by opening a real browser window for you to sign in to Apple yourself â€
 
 ```bash
 uv sync --extra login
+uv run playwright install chromium
 uv run applepodbar login
 ```
 
@@ -65,16 +75,32 @@ Configuration lives in the platform-standard user config directory:
 
 ```
 <config_dir>/applepodbar/
-  config.toml   storefront and playback preferences
-  tokens.json   cached tokens, written user-only (mode 600)
+  config.toml          storefront and playback preferences
+  tokens.json          cached developer JWT, written user-only (mode 600)
+  local_library.json   local follows and RSS resume positions (mode 600)
+OS keyring             media-user-token and browser session cookies
 ```
+
+Set `[general] catalog_backend = "rss"` in `config.toml` to avoid the private
+API altogether. In RSS mode, press `a` on a show to follow it locally; `l`
+lists locally followed shows. Resume positions stay on this device.
+
+The installed tool can enable login with `uv tool install --from . --with keyring
+--with playwright applepodbar`; install its Chromium browser separately via
+`uv run --with playwright playwright install chromium` or use the development
+checkout commands above. Linux keyring support requires an unlocked Secret
+Service backend. No account password is handled by applepodbar.
 
 ## Development
 
 ```bash
 uv run pytest -q
-uv run prek run --all-files
+uv run ruff check src tests
+uv run ruff format --check src tests
 uv run mypy src/applepodbar tests
+uv run pyright
+uvx prek run --all-files
+uv build
 ```
 
 ## License

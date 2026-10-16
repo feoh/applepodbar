@@ -8,14 +8,19 @@ license = "MIT"
 license-files = ["LICENSE"]
 requires-python = ">=3.12"
 dependencies = [
+  "cyclopts>=4.0",
   "feedparser>=6.0.11",
   "httpx>=0.28.1",
   "platformdirs>=4.10.0",
   "textual>=8.2.7",
+  "textual-image>=0.8",
 ]
 
 [project.optional-dependencies]
-login = ["playwright>=1.49.0"]
+login = [
+    "keyring>=25.0",
+    "playwright>=1.49.0",
+]
 
 [project.scripts]
 applepodbar = "applepodbar.app:main"
@@ -28,4 +33,9 @@ build-backend = "uv_build"
 source-exclude = [".ruff_cache"]
 
 [dependency-groups]
-dev = ["mypy>=2.1.0", "pytest>=9.0.3", "ruff>=0.15.16"]
+dev = [
+    "mypy>=2.1.0",
+    "pyright>=1.1.400",
+    "pytest>=9.0.3",
+    "ruff>=0.15.16",
+]

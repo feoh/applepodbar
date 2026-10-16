@@ -1,0 +1,31 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v10
+        with:
+          enable-cache: true
+      - name: Install project
+        run: uv sync --locked
+      - name: Lint and format
+        run: |
+          uv run ruff check src tests
+          uv run ruff format --check src tests
+      - name: Type check
+        run: |
+          uv run mypy src/applepodbar tests
+          uv run pyright
+      - name: Offline tests
+        run: uv run pytest -q
+      - name: Build package
+        run: uv build

@@ -63,6 +63,8 @@ class Episode:
     release_date: str = ""
     artwork_url: str | None = None
     source: Source = Source.AMP
+    is_paid: bool = False
+    subscription_url: str | None = None
 
     @property
     def label(self) -> str:
@@ -76,7 +78,7 @@ class Episode:
     def is_playable(self) -> bool:
         """Return whether this episode exposes an audio asset we can play."""
 
-        return bool(self.asset_url)
+        return bool(self.asset_url) and not self.is_paid
 
     @property
     def supports_position_sync(self) -> bool:
@@ -115,6 +117,7 @@ class QueueEpisode:
     stream_url: str
     duration_ms: int = 0
     source: Source = Source.AMP
+    artwork_url: str | None = None
 
     @property
     def label(self) -> str:
@@ -130,7 +133,7 @@ class QueueEpisode:
             ValueError: If the episode has no audio asset.
         """
 
-        if not episode.asset_url:
+        if not episode.is_playable or not episode.asset_url:
             msg = f"Episode {episode.id!r} has no playable asset URL."
             raise ValueError(msg)
         return cls(
@@ -140,6 +143,7 @@ class QueueEpisode:
             stream_url=episode.asset_url,
             duration_ms=episode.duration_ms,
             source=episode.source,
+            artwork_url=episode.artwork_url,
         )
 
 

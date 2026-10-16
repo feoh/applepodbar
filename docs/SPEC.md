@@ -1,6 +1,6 @@
 # applepodbar — Specification
 
-**Status:** spec phase, approved for implementation
+**Status:** implementation in progress
 **Last verified:** 2026-10-16
 **Project:** `wp-applepodbar-apple-podcasts-terminal-player-4a5c40`
 
@@ -80,7 +80,10 @@ Everything in this section was probed live against the production API on
 | User token header | `media-user-token: <token>` |
 
 The `media-user-token` header name was read directly out of the web bundle, not
-guessed.
+guessed. **Verified live with a signed-in account 2026-10-16:** all Library,
+Up Next, recents, and storefront GETs listed below returned 200 with the
+media-user-token alone (plus developer Bearer JWT and Origin); no browser
+cookies were needed.
 
 The developer token is an ES256 JWT. The one observed on 2026-10-16 had:
 
@@ -162,15 +165,41 @@ must treat differently:
 
 A 403/40300 means "sign in" and should trigger the login flow or the anonymous
 fallback. A 400/40008 is a **bug in applepodbar** (wrong path) and must surface
-as an error, not as a login prompt. Do not collapse these.
+as an error, not as a login prompt. Do not collapse these. For most `/me` list
+routes, `limit=50` instead gives **400/40005**; `limit=25` works. Pagination
+`next` is a relative URL starting `/v1/me/` with an `offset` query, not a
+catalog-relative path.
+
+**Mutations, captured from a real browser and independently replayed with httpx
+on 2026-10-16:**
+
+```
+POST   /v1/me/library/podcasts/{showId}           follow (HTTP 202)
+DELETE /v1/me/library/podcasts/{showId}           unfollow (HTTP 204)
+POST   /v1/me/library/podcast-episodes/{episodeId} save (HTTP 202)
+DELETE /v1/me/library/podcast-episodes/{episodeId} unsave (HTTP 204)
+```
+
+The web player adds `with` and `l` query keys, but direct requests without
+them succeeded. POST has no JSON body. The public test show and episode were
+restored to unfollowed/unsaved immediately after probing. **Mark Played** was
+not live-tested at the owner's request; bundle code maps it to a completed
+playback-position write (§3.5) with `positionInMilliseconds=duration`.
 
 ### 3.5 Position sync — exact wire format
 
-Read out of the bundle's own request builder:
+**Corrected by live browser-network capture and a successful HTTP 204 write on
+2026-10-16** (the earlier bundle-only interpretation below was wrong):
 
 ```
-PUT /v1/me/playback/positions/podcast-episodes?ids[]={episodeId}
+GET /v1/me/playback/positions/podcast-episodes?ids={episodeId}
+PUT /v1/me/playback/positions/podcast-episodes/{episodeId}
 ```
+
+The bundle's `.withIds([id])` builds a resource path for PUT, not `ids[]`.
+The web player also sends `with` and `l` query parameters on the PUT, but a
+live write without them returned 204. PUT to the collection URL with
+`ids[]=ID` returned **405** (Allow: GET,OPTIONS); do not use that shape.
 
 Body:
 
@@ -187,8 +216,11 @@ Body:
 
 Observed semantics from the bundle: when `completed` is not supplied explicitly
 it defaults to `position == duration`; `recordedAtTimestamp` is the client's
-current time in ISO-8601. Reads come back with `positionInMilliseconds` and
-`completed`, and the player resumes at `positionInMilliseconds / 1000` seconds.
+current time in ISO-8601. Reads with `ids=ID` come back with
+`positionInMilliseconds` and `completed`; the player resumes at
+`positionInMilliseconds / 1000` seconds. A headed/headless Playwright playback
+probe captured the PUT to the `/{episodeId}` resource and HTTP 204 response;
+then the same current position was written back successfully via httpx.
 
 This is G5 (cross-device sync) fully specified. It is a real two-way sync: write
 on pause/stop/exit/episode-end, read on episode load.
@@ -225,10 +257,11 @@ Two tokens, acquired two different ways, with very different lifetimes.
    `<script type="module" crossorigin src="/assets/index~<hash>.js">`.
    The hash changes on every web deploy, so it must be read from the HTML, not
    cached as a URL.
-3. `GET` that bundle and extract the first ES256 JWT matching
-   `eyJ0eXAiOiJKV1QiLCJhbGciOiJFUzI1NiI[A-Za-z0-9._-]{40,}`.
-   (Note the header is `{"typ":"JWT","alg":"ES256",…}` — a naive
-   `eyJhbGciOiJFUzI1NiI` prefix does **not** match and will find nothing.)
+3. `GET` that bundle, scan three-part `eyJ…` JWT candidates, decode each
+   header and select one with `alg=ES256` and a valid `exp` claim. The literal
+   `…NiI` prefix only matches headers with certain following fields: a header
+   ending immediately after `"ES256"` instead encodes to `…NiJ9`. A naive
+   `eyJhbGciOiJFUzI1NiI` prefix also fails because `typ` comes first.
 4. Decode the payload, read `exp`, cache the token to disk with its expiry.
 5. Re-scrape when within 24h of `exp`, or on any 401 from the API.
 
@@ -245,14 +278,16 @@ Apple ID password or implementing Apple's SRP/2FA dance.
    `https://podcasts.apple.com`.
 2. The user signs in themselves, including 2FA, in that real browser window.
    applepodbar neither reads nor stores the password.
-3. applepodbar waits for the sign-in to settle, then reads the
-   `media-user-token` value — from the page's own storage/cookies as the web
-   player sets it — and persists it.
+3. applepodbar listens for the `media-user-token` header on the web player's
+   authenticated AMP requests (including popup requests) and captures cookies
+   for later investigation. After signing in, open Library if no request has
+   yet carried a user token.
 4. The browser closes. This is a once-per-machine operation.
 
-Storage: the token goes in the config dir (§5) in a file created with mode
-`0600`. It is never logged, never echoed to the TUI, and redacted from any
-debug/HTTP trace output.
+Storage: the user token and captured cookie jar go in the OS keyring. The
+cached developer JWT alone goes in `tokens.json` (mode `0600`). The user token
+is never logged or echoed to the TUI. On Linux, a working keyring backend must
+be installed and unlocked for signed-in features.
 
 Playwright is an **optional dependency** (`applepodbar[login]`), because the
 anonymous catalog experience must work without a 400MB browser download. The
@@ -451,8 +486,11 @@ Platform-standard user config dir via `platformdirs` (same as plexbar):
 
 ```
 <config_dir>/applepodbar/
-  config.toml        storefront, UI prefs, playback speed, seek increments
-  tokens.json        dev token + exp, media-user-token      (mode 0600)
+  config.toml        storefront, UI prefs, playback speed, seek increments,
+                     catalog_backend = "amp" | "rss"
+  tokens.json        dev token + exp  (mode 0600)
+  local_library.json local RSS follows and resume positions (mode 0600)
+OS keyring            media-user-token + captured cookies
 ```
 
 Storefront defaults to `us`, overridable in config, and refreshed from
