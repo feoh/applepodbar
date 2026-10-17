@@ -22,6 +22,8 @@ Paid FairPlay content remains out of scope; see [`docs/SPEC.md`](docs/SPEC.md).
 
 ![applepodbar home screen showing top podcasts](docs/screenshot.svg)
 
+![applepodbar playing an ANTIC episode, with the show's episode list, cover art, and queue](docs/screenshot-playing.png)
+
 ## Features
 
 - Browse and search the Apple Podcasts catalog; play free episodes through `mpv`
