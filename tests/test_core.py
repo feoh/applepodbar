@@ -10,6 +10,7 @@ import json
 import stat
 from collections.abc import Callable, Coroutine
 from pathlib import Path
+from typing import ClassVar, Self
 
 import pytest
 
@@ -135,6 +136,34 @@ def test_appending_does_not_start_playback() -> None:
     # Exhausted: no current episode, and no crash.
     assert queue.next() is None
     assert queue.current is None
+
+
+def test_insert_next_plays_before_older_queue_entries() -> None:
+    """Playing something now must not wait behind what was already queued."""
+
+    queue = PlaybackQueue()
+    queue.append([_queued("a"), _queued("b")])
+    queue.next()
+    queue.insert_next([_queued("now")])
+
+    assert [e.episode_id for e in queue.episodes] == ["a", "now", "b"]
+    next_episode = queue.next()
+    assert next_episode is not None
+    assert next_episode.episode_id == "now"
+
+
+def test_jump_to_selects_the_next_episode() -> None:
+    queue = PlaybackQueue()
+    queue.append([_queued("a"), _queued("b"), _queued("c")])
+    queue.next()
+
+    assert queue.jump_to(7) is None
+    jumped = queue.jump_to(2)
+    assert jumped is not None
+    assert jumped.episode_id == "c"
+    next_episode = queue.next()
+    assert next_episode is not None
+    assert next_episode.episode_id == "c"
 
 
 def test_replace_resets_playback_state() -> None:
@@ -519,3 +548,60 @@ def test_missing_mpv_is_reported_without_crashing(
             assert "mpv was not found" in str(status.render())
 
     _run_app(scenario)
+
+
+class _FakeMpvSocket:
+    """Unix socket stand-in that answers each mpv command with a canned error."""
+
+    errors: ClassVar[dict[str, str]] = {
+        "get_property": "property unavailable",
+        "seek": "error running command",
+        "cycle": "error running command",
+    }
+
+    def __init__(self, *_args: object) -> None:
+        self.reply = b""
+
+    def __enter__(self) -> Self:
+        return self
+
+    def __exit__(self, *_exc: object) -> None:
+        pass
+
+    def settimeout(self, _timeout: float) -> None:
+        pass
+
+    def connect(self, _path: str) -> None:
+        pass
+
+    def sendall(self, data: bytes) -> None:
+        request = json.loads(data)
+        error = self.errors[request["command"][0]]
+        self.reply = json.dumps(
+            {"request_id": request["request_id"], "error": error}
+        ).encode()
+
+    def recv(self, _size: int) -> bytes:
+        reply, self.reply = self.reply, b""
+        return reply + b"\n" if reply else b""
+
+
+def test_mpv_loading_stream_does_not_raise(monkeypatch: pytest.MonkeyPatch) -> None:
+    """mpv reports these errors for the first seconds after loadfile.
+
+    Probed against a real mpv: get_property time-pos/duration answer
+    ``property unavailable`` and a relative seek answers ``error running
+    command`` until the stream opens. Pressing ``n`` then crashed the app.
+    """
+
+    monkeypatch.setattr(playback_module.shutil, "which", lambda _name: "/bin/mpv")
+    monkeypatch.setattr(playback_module.MpvPlayer, "_start_mpv", lambda _self: None)
+    monkeypatch.setattr(playback_module.socket, "socket", _FakeMpvSocket)
+    player = playback_module.MpvPlayer()
+    player._loaded = True
+
+    assert player.playback_progress() == PlaybackProgress()
+    player.seek(30)
+    # Other failures are still real errors.
+    with pytest.raises(RuntimeError, match="error running command"):
+        player.pause_resume()

@@ -25,6 +25,7 @@ from applepodbar.models import QueueEpisode
 
 MIN_PLAYBACK_SPEED = 0.5
 MAX_PLAYBACK_SPEED = 3.0
+PROPERTY_UNAVAILABLE = "property unavailable"
 
 
 class MpvNotFoundError(RuntimeError):
@@ -86,6 +87,19 @@ class PlaybackQueue:
         """Append episodes without changing playback state."""
 
         self.episodes.extend(episodes)
+
+    def insert_next(self, episodes: list[QueueEpisode]) -> None:
+        """Insert episodes so they are the next ones ``next()`` returns."""
+
+        self.episodes[self.next_index : self.next_index] = episodes
+
+    def jump_to(self, index: int) -> QueueEpisode | None:
+        """Make ``index`` the next episode, so ``next()`` plays it."""
+
+        if not 0 <= index < len(self.episodes):
+            return None
+        self.next_index = index
+        return self.episodes[index]
 
     def replace(self, episodes: list[QueueEpisode]) -> None:
         """Replace the queue without starting playback."""
@@ -203,7 +217,10 @@ class MpvPlayer:
         if not self._loaded:
             return
         self._ensure_running()
-        self._command(["seek", offset_seconds, "relative"])
+        # mpv rejects seeks while a stream is still opening; dropping the
+        # keypress beats crashing, and the user can simply press it again.
+        with suppress(RuntimeError):
+            self._command(["seek", offset_seconds, "relative"])
 
     def set_speed(self, speed: float) -> float:
         """Clamp and apply a playback speed multiplier, returning what was set."""
@@ -289,13 +306,20 @@ class MpvPlayer:
         msg = "Timed out waiting for mpv IPC socket."
         raise RuntimeError(msg)
 
-    def _command(self, command: list[object]) -> dict[str, Any]:
-        return self._request({"command": command})
+    def _command(
+        self, command: list[object], *, tolerate: str | None = None
+    ) -> dict[str, Any]:
+        return self._request({"command": command}, tolerate=tolerate)
 
     def _get_property(self, name: str) -> Any:
-        return self._command(["get_property", name]).get("data")
+        # time-pos and duration are unavailable while a stream is still
+        # opening, and while idle. That is a normal state, not a failure.
+        response = self._command(["get_property", name], tolerate=PROPERTY_UNAVAILABLE)
+        return response.get("data")
 
-    def _request(self, payload: dict[str, object]) -> dict[str, Any]:
+    def _request(
+        self, payload: dict[str, object], *, tolerate: str | None = None
+    ) -> dict[str, Any]:
         self._request_id += 1
         request_id = self._request_id
         request = json.dumps({**payload, "request_id": request_id}).encode() + b"\n"
@@ -304,7 +328,7 @@ class MpvPlayer:
             client.connect(str(self._socket_path))
             client.sendall(request)
             response = self._read_response(client, request_id)
-        if response.get("error") not in {None, "success"}:
+        if response.get("error") not in {None, "success", tolerate}:
             msg = f"mpv command failed: {response['error']}"
             raise RuntimeError(msg)
         return response

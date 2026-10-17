@@ -62,6 +62,12 @@ SIGNED_IN_VIEWS = frozenset({View.LIBRARY, View.UP_NEXT})
 
 SIGN_IN_PROMPT = "Sign in with `applepodbar login` to use this view."
 
+#: A browser location: (load_content kind, value, view). Top-level views use
+#: VIEW_LOCATION as the kind and the View name as the value.
+type Location = tuple[str, str, View]
+VIEW_LOCATION = "view"
+MAX_HISTORY = 50
+
 
 @dataclass(frozen=True)
 class ViewState:
@@ -130,8 +136,15 @@ class ApplepodbarApp(App[None]):
     }
 
     #cover-art {
+        /* width: auto keeps the artwork's aspect ratio within the height. */
+        width: auto;
         height: 12;
         display: none;
+    }
+
+    #queue-title {
+        padding: 0 1;
+        color: $text-muted;
     }
 
     #description {
@@ -170,6 +183,7 @@ class ApplepodbarApp(App[None]):
     BINDINGS: ClassVar = [
         Binding("q", "quit", "Quit"),
         Binding("slash", "focus_search", "Search"),
+        Binding("escape", "go_back", "Back", show=False),
         Binding("h", "show_view('HOME')", "Home"),
         Binding("l", "show_view('LIBRARY')", "Library"),
         Binding("u", "show_view('UP_NEXT')", "Up Next"),
@@ -180,8 +194,9 @@ class ApplepodbarApp(App[None]):
         Binding("left", "seek_back", "Seek -"),
         Binding("plus", "speed_up", "Faster"),
         Binding("minus", "speed_down", "Slower"),
+        Binding("e", "enqueue", "Queue"),
         Binding("n", "next_episode", "Next"),
-        Binding("b", "show_view('HOME')", "Back"),
+        Binding("b", "go_back", "Back"),
         Binding("a", "toggle_follow", "Follow"),
         Binding("v", "toggle_save", "Save"),
         Binding("m", "mark_played", "Played"),
@@ -202,6 +217,8 @@ class ApplepodbarApp(App[None]):
         self._last_local_save = time.monotonic()
         self._last_progress = PlaybackProgress()
         self._playing_id: str | None = None
+        self._location: Location | None = None
+        self._history: list[Location] = []
 
     def compose(self) -> ComposeResult:
         """Build the widget tree."""
@@ -215,6 +232,7 @@ class ApplepodbarApp(App[None]):
             with Vertical(id="side"):
                 yield AutoImage(id="cover-art")
                 yield Static("", id="description")
+                yield Static("Queue — Enter jumps to an episode", id="queue-title")
                 yield ListView(id="queue-list")
         yield Static("Nothing playing", id="now-playing")
         yield ProgressBar(
@@ -236,16 +254,68 @@ class ApplepodbarApp(App[None]):
         if self.tokens.is_signed_in and not getattr(self.catalog, "using_rss", False):
             self.load_account_storefront()
         self.set_interval(1, self.refresh_progress)
-        if not self.tokens.is_signed_in:
-            self.set_status("Not signed in — catalog browsing only.")
+        if self.tokens.is_signed_in:
+            self.set_status("Signed in — press l for Library, u for Up Next.")
+        else:
+            self.set_status(
+                "Not signed in — catalog browsing only. Quit and run `applepodbar login`."
+            )
 
     # -- view management ---------------------------------------------------
 
-    def show_view(self, view: View) -> None:
+    def remember(self, location: Location) -> None:
+        """Record a navigation so ``b`` can return to where the user was."""
+
+        if location == self._location:
+            return
+        if self._location is not None:
+            self._history = [*self._history, self._location][-MAX_HISTORY:]
+        self._location = location
+
+    def open_location(
+        self, location: Location, message: str, *, remember: bool = True
+    ) -> None:
+        """Load content into the browser, e.g. a show's episodes."""
+
+        if remember:
+            self.remember(location)
+        kind, value, view = location
+        self._revision += 1
+        self.state = ViewState(view, message=message)
+        self.render_state()
+        self.load_content(kind, value, self._revision)
+
+    def action_go_back(self) -> None:
+        """Close search, or return to the previous browser location."""
+
+        search = self.query_one("#search", Input)
+        if search.has_focus and self._location is not None:
+            # Abandoning a search returns to whatever was shown before `/`.
+            location = self._location
+        elif self._history:
+            location = self._history.pop()
+            self._location = location
+        else:
+            self.show_view(View.HOME)
+            return
+        kind, _, view = location
+        if kind == VIEW_LOCATION:
+            self.show_view(view, remember=False)
+        else:
+            self.open_location(location, "Loading…", remember=False)
+
+    def show_view(self, view: View, *, remember: bool = True) -> None:
         """Switch the browser pane to a view."""
 
+        if remember and view is not View.SEARCH:
+            self.remember((VIEW_LOCATION, view.name, view))
         self._revision += 1
-        self.query_one("#search", Input).display = view is View.SEARCH
+        search = self.query_one("#search", Input)
+        search.display = view is View.SEARCH
+        if not search.display and (self.focused is None or self.focused is search):
+            # A hidden Input that keeps focus swallows every letter binding,
+            # which made Library and Up Next unreachable from the keyboard.
+            self.query_one("#browser-list", ListView).focus()
         if view is View.LIBRARY and getattr(self.catalog, "using_rss", False):
             self.state = ViewState(view, message="Loading local follows…")
             self.render_state()
@@ -372,6 +442,9 @@ class ApplepodbarApp(App[None]):
         self.update_now_playing()
         self.render_queue()
         self.show_cover_art(episode.artwork_url)
+        self.set_status(
+            f"Playing {episode.title}. Enter plays another episode, e queues it, n skips."
+        )
 
     def enqueue(self, episodes: list[QueueEpisode]) -> None:
         """Append episodes to the queue."""
@@ -649,14 +722,16 @@ class ApplepodbarApp(App[None]):
         if event.input.id == "search":
             term = event.value.strip()
             if term:
-                self._revision += 1
-                self.state = ViewState(View.SEARCH, message=f"Searching for {term}…")
-                self.render_state()
                 self.query_one("#search", Input).display = False
                 self.query_one("#browser-list", ListView).focus()
-                self.load_content("search", term, self._revision)
+                self.open_location(
+                    ("search", term, View.SEARCH), f"Searching for {term}…"
+                )
 
     def on_list_view_selected(self, event: ListView.Selected) -> None:
+        if event.list_view.id == "queue-list":
+            self.play_queue_index(event.list_view.index)
+            return
         if event.list_view.id != "browser-list" or not isinstance(
             event.item, BrowserRow
         ):
@@ -668,12 +743,14 @@ class ApplepodbarApp(App[None]):
                     "Channel and station details are not available in this view."
                 )
                 return
-            self._revision += 1
             if item.id.startswith("library:"):
-                self.state = ViewState(View.LIBRARY, message="Loading Library section…")
-                self.render_state()
-                self.load_content(
-                    "library_section", item.id.removeprefix("library:"), self._revision
+                self.open_location(
+                    (
+                        "library_section",
+                        item.id.removeprefix("library:"),
+                        View.LIBRARY,
+                    ),
+                    "Loading Library section…",
                 )
                 return
             if item.id in {"genres", "editorial"}:
@@ -682,27 +759,59 @@ class ApplepodbarApp(App[None]):
                 kind = "genre"
             else:
                 kind = "grouping"
-            self.load_content(kind, item.id.removeprefix("genre:"), self._revision)
+            self.open_location(
+                (kind, item.id.removeprefix("genre:"), View.HOME), "Loading…"
+            )
         elif item.kind is ItemKind.SHOW:
-            self._revision += 1
-            self.state = ViewState(View.SHOW, message="Loading episodes…")
-            self.render_state()
-            self.load_content("show", item.id, self._revision)
+            self.open_location(("show", item.id, View.SHOW), "Loading episodes…")
         else:
-            episode = self.episodes.get(item.id)
-            if episode is None:
-                return
-            if not episode.is_playable:
-                self.set_status(
-                    "This episode is not playable in mpv. Paid Apple audio uses FairPlay; listen in Apple Podcasts."
-                )
-                return
-            self.enqueue([QueueEpisode.from_episode(episode)])
-            self.query_one("#description", Static).update(episode.description)
-            if self.queue.current is None:
-                self.play_next()
-            else:
-                self.set_status(f"Queued {episode.title}.")
+            self.play_episode_now(item.id)
+
+    def playable_episode(self, episode_id: str) -> Episode | None:
+        """Return a listed episode if mpv can play it, explaining if not."""
+
+        episode = self.episodes.get(episode_id)
+        if episode is None:
+            return None
+        if not episode.is_playable:
+            self.set_status(
+                "This episode is not playable in mpv. Paid Apple audio uses FairPlay; listen in Apple Podcasts."
+            )
+            return None
+        return episode
+
+    def play_episode_now(self, episode_id: str) -> None:
+        """Play an episode immediately, saving the position of the current one."""
+
+        episode = self.playable_episode(episode_id)
+        if episode is None:
+            return
+        self.record_position(force=True, blocking=True)
+        self.queue.insert_next([QueueEpisode.from_episode(episode)])
+        self.query_one("#description", Static).update(episode.description)
+        self.play_next()
+
+    def action_enqueue(self) -> None:
+        """Add the highlighted episode to the end of the queue."""
+
+        row = self.query_one("#browser-list", ListView).highlighted_child
+        if not isinstance(row, BrowserRow) or row.item.kind is not ItemKind.EPISODE:
+            self.set_status("Highlight an episode to add it to the queue.")
+            return
+        episode = self.playable_episode(row.item.id)
+        if episode is None:
+            return
+        self.enqueue([QueueEpisode.from_episode(episode)])
+        self.set_status(f"Queued {episode.title}. Press n to skip to it.")
+
+    def play_queue_index(self, index: int | None) -> None:
+        """Jump to a queue row selected in the queue pane."""
+
+        if index is None or index == self.queue.current_index:
+            return
+        self.record_position(force=True, blocking=True)
+        if self.queue.jump_to(index) is not None:
+            self.play_next()
 
     def action_toggle_follow(self) -> None:
         """Follow/unfollow the selected show locally or in Apple Library."""
@@ -821,7 +930,15 @@ class ApplepodbarApp(App[None]):
             or current.episode_id != self._playing_id
         ):
             return
-        progress = progress or self.player.playback_progress()
+        if progress is None:
+            try:
+                progress = self.player.playback_progress()
+            except (OSError, RuntimeError):
+                progress = self._last_progress
+        if progress.duration_seconds <= 0 and not completed:
+            # mpv has not opened the stream yet, so 0 is not a real position.
+            # Writing it would clobber the resume point we just started from.
+            return
         if current.source is Source.RSS:
             if force or time.monotonic() - self._last_local_save >= 30:
                 self.local_library.set_position(

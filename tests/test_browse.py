@@ -59,6 +59,7 @@ class FakePlayer:
         self.starts: list[float] = []
         self.speed = 1.0
         self.is_paused = False
+        self.stops = 0
 
     def play(self, episode: QueueEpisode, start_seconds: float = 0) -> None:
         self.played.append(episode)
@@ -70,6 +71,9 @@ class FakePlayer:
 
     def pause_resume(self) -> None:
         self.is_paused = not self.is_paused
+
+    def stop(self) -> None:
+        self.stops += 1
 
     def reap_finished(self) -> bool:
         return False
@@ -338,5 +342,206 @@ def test_signed_in_episode_resumes_and_syncs_on_pause(
             await pilot.pause()
             await pilot.pause()
             assert ("22", 30_000, True) in catalog.positions
+
+    asyncio.run(scenario())
+
+
+def test_letter_bindings_work_at_startup(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Startup must not leave focus in the hidden search Input."""
+
+    monkeypatch.setattr(
+        app_module, "load_tokens", lambda: Tokens(media_user_token="fixture")
+    )
+    monkeypatch.setattr(app_module, "load_config", app_module.ApplepodbarConfig)
+
+    class LibraryCatalog(FakeCatalog):
+        using_rss = False
+
+        def library_shows(self) -> list[Show]:
+            return [self.daily]
+
+        def account_storefront(self) -> str:
+            return "us"
+
+    async def scenario() -> None:
+        app = ApplepodbarApp(catalog=LibraryCatalog())  # type: ignore[arg-type]
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            assert "Signed in" in str(app.query_one("#status", Static).render())
+            await pilot.press("l")
+            await pilot.pause()
+            await pilot.pause()
+            assert app.state.view is View.LIBRARY
+            assert "The Daily" in [item.title for item in app.state.items]
+            await pilot.press("slash")
+            assert app.focused is app.query_one("#search", Input)
+            await pilot.press("escape")
+            assert not app.query_one("#search", Input).display
+            assert app.focused is app.query_one("#browser-list", ListView)
+
+    asyncio.run(scenario())
+
+
+class TwoEpisodeCatalog(FakeCatalog):
+    using_rss = False
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.other = Show(id="2", title="Darknet Diaries", author="Jack")
+        self.second = Episode(
+            id="33",
+            title="Tomorrow",
+            show_id="1",
+            show_title="The Daily",
+            asset_url="https://example.invalid/tomorrow.mp3",
+        )
+        self.positions: list[tuple[str, int]] = []
+
+    def charts(self) -> list[Show]:
+        return [self.daily, self.other]
+
+    def show(self, show_id: str) -> tuple[Show, list[Episode]]:
+        if show_id == "2":
+            return self.other, []
+        return self.daily, [self.episode_record, self.second]
+
+    def account_storefront(self) -> str:
+        return "us"
+
+    def resume_position(self, episode_id: str, duration_ms: int) -> float:
+        return 0.0
+
+    def update_position(
+        self,
+        episode_id: str,
+        position_ms: int,
+        duration_ms: int,
+        *,
+        force: bool = False,
+        completed: bool = False,
+    ) -> bool:
+        self.positions.append((episode_id, position_ms))
+        return True
+
+
+def test_enter_switches_episodes_and_back_returns(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Enter plays now, e queues, b steps back, and the queue pane jumps."""
+
+    monkeypatch.setattr(
+        app_module, "load_tokens", lambda: Tokens(media_user_token="fixture")
+    )
+    monkeypatch.setattr(app_module, "load_config", app_module.ApplepodbarConfig)
+
+    async def settle(pilot: object) -> None:
+        for _ in range(3):
+            await pilot.pause()  # type: ignore[attr-defined]
+
+    async def scenario() -> None:
+        catalog = TwoEpisodeCatalog()
+        app = ApplepodbarApp(catalog=catalog)  # type: ignore[arg-type]
+        async with app.run_test() as pilot:
+            player = FakePlayer()
+            app.player = player  # type: ignore[assignment]
+            await settle(pilot)
+            browser = app.query_one("#browser-list", ListView)
+            browser.index = 2  # The Daily, after the two category rows
+            await pilot.press("enter")
+            await settle(pilot)
+            assert app.state.view is View.SHOW
+
+            browser.index = 0
+            await pilot.press("enter")
+            await settle(pilot)
+            browser.index = 1
+            await pilot.press("enter")
+            await settle(pilot)
+            # The second Enter switched immediately and saved the first position.
+            assert [e.episode_id for e in player.played] == ["22", "33"]
+            assert ("22", 30_000) in catalog.positions
+            assert "Enter plays another" in str(
+                app.query_one("#status", Static).render()
+            )
+
+            browser.index = 0
+            await pilot.press("e")
+            assert [e.episode_id for e in app.queue.episodes][-1] == "22"
+            assert [e.episode_id for e in player.played] == ["22", "33"]
+
+            queue_list = app.query_one("#queue-list", ListView)
+            queue_list.focus()
+            queue_list.index = 0
+            await pilot.press("enter")
+            await settle(pilot)
+            assert player.played[-1].episode_id == "22"
+
+            browser.focus()
+            await pilot.press("b")
+            await settle(pilot)
+            assert app.state.view is View.HOME
+            assert "Darknet Diaries" in [item.title for item in app.state.items]
+
+    asyncio.run(scenario())
+
+
+def test_switching_before_mpv_opens_stream_keeps_resume_point(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A not-yet-loaded stream reports 0/0; that must not be synced as 0."""
+
+    monkeypatch.setattr(
+        app_module, "load_tokens", lambda: Tokens(media_user_token="fixture")
+    )
+    monkeypatch.setattr(app_module, "load_config", app_module.ApplepodbarConfig)
+
+    class LoadingPlayer(FakePlayer):
+        def playback_progress(self) -> PlaybackProgress:
+            return PlaybackProgress()
+
+    async def scenario() -> None:
+        catalog = TwoEpisodeCatalog()
+        app = ApplepodbarApp(catalog=catalog)  # type: ignore[arg-type]
+        async with app.run_test() as pilot:
+            player = LoadingPlayer()
+            app.player = player  # type: ignore[assignment]
+            app.episodes = {"22": catalog.episode_record, "33": catalog.second}
+            app.play_episode_now("22")
+            await pilot.pause()
+            await pilot.pause()
+            app.play_episode_now("33")
+            await pilot.pause()
+            await pilot.pause()
+            assert [e.episode_id for e in player.played] == ["22", "33"]
+            assert catalog.positions == []
+
+    asyncio.run(scenario())
+
+
+def test_cover_art_keeps_its_aspect_ratio(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Square artwork must render square, not stretched to fill the pane."""
+
+    from io import BytesIO
+
+    from PIL import Image
+    from textual_image._terminal import get_cell_size
+    from textual_image.widget import AutoImage
+
+    monkeypatch.setattr(app_module, "load_tokens", Tokens)
+    monkeypatch.setattr(app_module, "load_config", app_module.ApplepodbarConfig)
+
+    async def scenario() -> None:
+        app = ApplepodbarApp(catalog=FakeCatalog())  # type: ignore[arg-type]
+        async with app.run_test(size=(140, 40)) as pilot:
+            data = BytesIO()
+            Image.new("RGB", (600, 600)).save(data, "PNG")
+            art = app.query_one("#cover-art", AutoImage)
+            art.image = BytesIO(data.getvalue())
+            art.display = True
+            await pilot.pause()
+            cell = get_cell_size()
+            pixel_width = art.size.width * cell.width
+            pixel_height = art.size.height * cell.height
+            assert abs(pixel_width / pixel_height - 1) < 0.1
 
     asyncio.run(scenario())
