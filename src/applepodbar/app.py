@@ -178,6 +178,21 @@ class ApplepodbarApp(App[None]):
     #search {
         display: none;
     }
+
+    /* Full-screen now playing: the side pane takes over the body. */
+    .-now-playing #browser,
+    .-now-playing #queue-title,
+    .-now-playing #queue-list {
+        display: none;
+    }
+
+    .-now-playing #cover-art {
+        height: 1fr;
+    }
+
+    .-now-playing #description {
+        max-height: 10;
+    }
     """
 
     BINDINGS: ClassVar = [
@@ -187,7 +202,7 @@ class ApplepodbarApp(App[None]):
         Binding("h", "show_view('HOME')", "Home"),
         Binding("l", "show_view('LIBRARY')", "Library"),
         Binding("u", "show_view('UP_NEXT')", "Up Next"),
-        Binding("f", "focus_now_playing", "Now playing"),
+        Binding("f", "toggle_now_playing", "Now playing"),
         Binding("space", "pause_resume", "Play/pause"),
         Binding("s", "stop", "Stop"),
         Binding("right", "seek_forward", "Seek +"),
@@ -219,6 +234,7 @@ class ApplepodbarApp(App[None]):
         self._playing_id: str | None = None
         self._location: Location | None = None
         self._history: list[Location] = []
+        self._now_playing_full = False
 
     def compose(self) -> ComposeResult:
         """Build the widget tree."""
@@ -277,6 +293,7 @@ class ApplepodbarApp(App[None]):
     ) -> None:
         """Load content into the browser, e.g. a show's episodes."""
 
+        self.set_now_playing_full(False)
         if remember:
             self.remember(location)
         kind, value, view = location
@@ -288,6 +305,9 @@ class ApplepodbarApp(App[None]):
     def action_go_back(self) -> None:
         """Close search, or return to the previous browser location."""
 
+        if self._now_playing_full:
+            self.set_now_playing_full(False)
+            return
         search = self.query_one("#search", Input)
         if search.has_focus and self._location is not None:
             # Abandoning a search returns to whatever was shown before `/`.
@@ -307,6 +327,7 @@ class ApplepodbarApp(App[None]):
     def show_view(self, view: View, *, remember: bool = True) -> None:
         """Switch the browser pane to a view."""
 
+        self.set_now_playing_full(False)
         if remember and view is not View.SEARCH:
             self.remember((VIEW_LOCATION, view.name, view))
         self._revision += 1
@@ -362,6 +383,7 @@ class ApplepodbarApp(App[None]):
         current = self.queue.current
         if current is None:
             self.query_one("#now-playing", Static).update("Nothing playing")
+            self.set_now_playing_full(False)
             return
 
         line = current.label
@@ -462,6 +484,7 @@ class ApplepodbarApp(App[None]):
     def action_focus_search(self) -> None:
         """Reveal and focus the search input."""
 
+        self.set_now_playing_full(False)
         search = self.query_one("#search", Input)
         search.display = True
         search.focus()
@@ -469,10 +492,32 @@ class ApplepodbarApp(App[None]):
         self.state = ViewState(view=View.SEARCH, message="Type a search term.")
         self.render_state()
 
-    def action_focus_now_playing(self) -> None:
-        """Move focus to the now-playing area."""
+    def action_toggle_now_playing(self) -> None:
+        """Toggle the full-screen now-playing view."""
 
-        self.query_one("#now-playing", Static).focus()
+        if not self._now_playing_full and self.queue.current is None:
+            self.set_status("Nothing playing.")
+            return
+        self.set_now_playing_full(not self._now_playing_full)
+
+    def set_now_playing_full(self, full: bool) -> None:
+        """Hide the browser and queue so artwork and description fill the body."""
+
+        if full == self._now_playing_full:
+            return
+        self._now_playing_full = full
+        self.screen.set_class(full, "-now-playing")
+        self.update_side_display()
+        if full:
+            current = self.queue.current
+            episode = self.episodes.get(current.episode_id) if current else None
+            if episode is not None:
+                # Browsing may have replaced it with the show's description.
+                self.query_one("#description", Static).update(episode.description)
+            # A focused but hidden list would still take arrows and Enter.
+            self.set_focus(None)
+        else:
+            self.query_one("#browser-list", ListView).focus()
 
     def action_pause_resume(self) -> None:
         """Toggle pause, or start the queue if nothing is loaded."""
@@ -1065,7 +1110,14 @@ class ApplepodbarApp(App[None]):
     def on_resize(self, event: object) -> None:
         """Keep the browser usable in narrow terminals."""
 
-        self.query_one("#side", Vertical).display = self.size.width >= 80
+        self.update_side_display()
+
+    def update_side_display(self) -> None:
+        """Show the side pane when there is room, or when it is all that shows."""
+
+        self.query_one("#side", Vertical).display = (
+            self._now_playing_full or self.size.width >= 80
+        )
 
     def on_unmount(self) -> None:
         """Shut mpv and the catalog connection pool down with the app."""

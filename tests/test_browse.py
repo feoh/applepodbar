@@ -545,3 +545,75 @@ def test_cover_art_keeps_its_aspect_ratio(monkeypatch: pytest.MonkeyPatch) -> No
             assert abs(pixel_width / pixel_height - 1) < 0.1
 
     asyncio.run(scenario())
+
+
+def test_f_toggles_full_screen_now_playing(monkeypatch: pytest.MonkeyPatch) -> None:
+    """f hides the browser and queue around artwork; f, b, or navigation exits."""
+
+    from io import BytesIO
+
+    from PIL import Image
+    from textual_image._terminal import get_cell_size
+    from textual_image.widget import AutoImage
+
+    monkeypatch.setattr(app_module, "load_tokens", Tokens)
+    monkeypatch.setattr(app_module, "load_config", app_module.ApplepodbarConfig)
+
+    async def scenario() -> None:
+        catalog = FakeCatalog()
+        app = ApplepodbarApp(catalog=catalog)  # type: ignore[arg-type]
+        async with app.run_test(size=(140, 40)) as pilot:
+            await pilot.pause()
+            browser = app.query_one("#browser-list", ListView)
+            side = app.query_one("#side")
+            browser_pane = app.query_one("#browser")
+            queue_list = app.query_one("#queue-list", ListView)
+            browser.focus()
+            await pilot.press("f")
+            assert "Nothing playing" in str(app.query_one("#status", Static).render())
+            assert browser_pane.display
+
+            app.player = FakePlayer()  # type: ignore[assignment]
+            app.episodes = {"22": catalog.episode_record}
+            app.play_episode_now("22")
+            await pilot.pause()
+            # Browsing elsewhere replaces the description with the show's.
+            app.query_one("#description", Static).update("News every day")
+            art = app.query_one("#cover-art", AutoImage)
+            data = BytesIO()
+            Image.new("RGB", (600, 600)).save(data, "PNG")
+            art.image = BytesIO(data.getvalue())
+            art.display = True
+            await pilot.pause()
+            small_height = art.size.height
+
+            await pilot.press("f")
+            await pilot.pause()
+            assert not browser_pane.display
+            assert not queue_list.display
+            assert side.size.width > 100
+            assert app.focused is None
+            assert "A story" in str(app.query_one("#description", Static).render())
+            assert art.size.height > small_height
+            cell = get_cell_size()
+            ratio = (art.size.width * cell.width) / (art.size.height * cell.height)
+            assert abs(ratio - 1) < 0.1
+
+            await pilot.press("f")
+            await pilot.pause()
+            assert browser_pane.display
+            assert queue_list.display
+            assert app.focused is browser
+
+            await pilot.press("f")
+            await pilot.press("b")
+            await pilot.pause()
+            assert browser_pane.display
+            assert app.state.view is View.HOME
+
+            await pilot.press("f")
+            await pilot.press("s")
+            await pilot.pause()
+            assert browser_pane.display
+
+    asyncio.run(scenario())

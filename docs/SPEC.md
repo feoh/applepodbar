@@ -361,7 +361,7 @@ Views: **Home** (editorial groupings / charts), **Search**, **Library**
 Anonymous mode shows Home, Search, and Show detail, with Library and Up Next
 replaced by a prompt to run `applepodbar login`.
 
-Keybindings follow plexbar where the concept matches (`/` search, `f` focus now
+Keybindings follow plexbar where the concept matches (`/` search, `f` full-screen now
 playing, `s` stop, space play/pause, `q` quit), plus podcast-specific ones:
 seek ±30s/±15s, playback speed, mark played.
 
