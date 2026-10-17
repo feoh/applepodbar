@@ -6,11 +6,13 @@ Apple ID/password and 2FA stay in the browser. We observe only the
 
 from __future__ import annotations
 
+import shlex
+import sys
 import time
 from typing import Any
 from urllib.parse import urlsplit
 
-from applepodbar.credentials import UserSession, save_session
+from applepodbar.credentials import INSTALL_LOGIN_EXTRA, UserSession, save_session
 
 
 class LoginError(RuntimeError):
@@ -81,7 +83,7 @@ def login() -> None:
         from playwright.sync_api import sync_playwright
     except ImportError as exc:
         raise LoginError(
-            "Install the login extra with `uv sync --extra login`, then `uv run playwright install chromium`."
+            f"Sign-in needs the login extra. {INSTALL_LOGIN_EXTRA}"
         ) from exc
 
     try:
@@ -95,7 +97,10 @@ def login() -> None:
             finally:
                 browser.close()
     except PlaywrightError as exc:
+        # sys.executable is the interpreter running us, so this works from a
+        # `uv tool` install and a source checkout alike.
+        install = f"{shlex.quote(sys.executable)} -m playwright install chromium"
         raise LoginError(
-            "Could not launch Chromium. Run `uv run playwright install chromium` and try again."
+            f"Could not launch Chromium. Run `{install}` and try again."
         ) from exc
     print("Apple Podcasts sign-in saved in your OS keyring.")

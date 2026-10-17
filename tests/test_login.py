@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import sys
 from typing import Any
 
 import pytest
@@ -103,3 +104,15 @@ def test_capture_times_out_without_a_token() -> None:
             context, FakePage(context, emit_request=False), timeout_seconds=0
         )
     assert context.removed
+
+
+def test_missing_login_extra_points_at_uv_tool_install(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from applepodbar import login
+
+    # A None entry makes the import raise ImportError, as with no extra installed.
+    monkeypatch.setitem(sys.modules, "playwright.sync_api", None)
+
+    with pytest.raises(LoginError, match=r"uv tool install 'applepodbar\[login\]'"):
+        login.login()

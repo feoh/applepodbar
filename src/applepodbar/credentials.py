@@ -11,6 +11,10 @@ from typing import Any
 
 SERVICE = "applepodbar"
 ACCOUNT = "apple-podcasts-session"
+INSTALL_LOGIN_EXTRA = (
+    "Reinstall with `uv tool install 'applepodbar[login]' --with-executables-from playwright`"
+    " (or run `uv sync --extra login` in a source checkout)."
+)
 
 
 @dataclass(frozen=True)
@@ -31,7 +35,7 @@ def _keyring() -> Any:
         import keyring
     except ImportError as exc:
         raise CredentialStoreError(
-            "Install the login extra with `uv sync --extra login` for keyring support."
+            f"Keyring support needs the login extra. {INSTALL_LOGIN_EXTRA}"
         ) from exc
     return keyring
 
