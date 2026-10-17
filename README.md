@@ -103,6 +103,19 @@ uvx prek run --all-files
 uv build
 ```
 
+## Releasing
+
+Publishing a GitHub release runs `.github/workflows/publish.yml`, which re-runs
+the checks, builds, and uploads to PyPI through trusted publishing (no API
+token). The release tag must be `v` plus the `pyproject.toml` version:
+
+```bash
+uv version --bump patch        # or minor / major
+git commit -am "Release v$(uv version --short)"
+git push
+gh release create "v$(uv version --short)" --generate-notes
+```
+
 ## License
 
 MIT — see [LICENSE](LICENSE).
