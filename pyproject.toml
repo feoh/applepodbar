@@ -1,6 +1,6 @@
 [project]
 name = "applepodbar"
-version = "0.1.0"
+version = "0.1.1"
 description = "A command-line TUI podcast player for Apple Podcasts"
 readme = "README.md"
 authors = [{ name = "Christopher Patti", email = "feoh@feoh.org" }]
