@@ -20,9 +20,9 @@ back to iTunes Search and publisher RSS. Signed-in Library, Up Next, and
 cross-device playback-position sync, and follow/save actions are now wired.
 Paid FairPlay content remains out of scope; see [`docs/SPEC.md`](docs/SPEC.md).
 
-![applepodbar home screen showing top podcasts](docs/screenshot.svg)
+![applepodbar home screen showing top podcasts](https://raw.githubusercontent.com/feoh/applepodbar/main/docs/screenshot.svg)
 
-![applepodbar playing an ANTIC episode, with the show's episode list, cover art, and queue](docs/screenshot-playing.png)
+![applepodbar playing an ANTIC episode, with the show's episode list, cover art, and queue](https://raw.githubusercontent.com/feoh/applepodbar/main/docs/screenshot-playing.png)
 
 ## Features
 
@@ -42,9 +42,13 @@ Paid FairPlay content remains out of scope; see [`docs/SPEC.md`](docs/SPEC.md).
 ## Install
 
 ```bash
-# From a local checkout (not yet published to PyPI):
-uv tool install --from . applepodbar
+uv tool install applepodbar
 applepodbar
+
+# With sign-in support (Library, Up Next, position sync):
+uv tool install 'applepodbar[login]' --with-executables-from playwright
+playwright install chromium
+applepodbar login
 ```
 
 ## Installation for development
@@ -87,11 +91,8 @@ Set `[general] catalog_backend = "rss"` in `config.toml` to avoid the private
 API altogether. In RSS mode, press `a` on a show to follow it locally; `l`
 lists locally followed shows. Resume positions stay on this device.
 
-The installed tool can enable login with `uv tool install --from . --with keyring
---with playwright applepodbar`; install its Chromium browser separately via
-`uv run --with playwright playwright install chromium` or use the development
-checkout commands above. Linux keyring support requires an unlocked Secret
-Service backend. No account password is handled by applepodbar.
+Linux keyring support requires an unlocked Secret Service backend. No account
+password is handled by applepodbar.
 
 ## Development
 
