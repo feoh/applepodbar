@@ -37,42 +37,30 @@ Paid FairPlay content remains out of scope; see [`docs/SPEC.md`](docs/SPEC.md).
 - [`uv`](https://docs.astral.sh/uv/)
 - [`mpv`](https://mpv.io/) on `PATH` (needed for playback; browsing works
   without it)
-- An Apple account, only for the signed-in features
+- An Apple account
 
 ## Install
 
 ```bash
-uv tool install applepodbar
-applepodbar
-
-# With sign-in support (Library, Up Next, position sync):
 uv tool install 'applepodbar[login]' --with-executables-from playwright
 playwright install chromium
 applepodbar login
+applepodbar
 ```
+
+`applepodbar login` opens a real browser window for you to sign in to Apple
+yourself, then saves the session in your OS keyring — **applepodbar never sees
+or stores your Apple ID password.** Run it again if the session expires.
 
 ## Installation for development
 
 ```bash
 git clone git@github.com:feoh/applepodbar.git
 cd applepodbar
-uv sync
-uv run applepodbar
-```
-
-## Signing in
-
-Catalog browsing, search, and playback of free episodes need no sign-in at all.
-
-Library, Up Next, and position sync need a per-user token. applepodbar captures
-it once by opening a real browser window for you to sign in to Apple yourself —
-**it never sees or stores your Apple ID password.** This needs the optional
-`login` extra:
-
-```bash
 uv sync --extra login
 uv run playwright install chromium
 uv run applepodbar login
+uv run applepodbar
 ```
 
 ## Configuration
